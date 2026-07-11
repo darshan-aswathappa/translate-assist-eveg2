@@ -1,0 +1,21 @@
+{
+  "package_id": "com.example.translateassist",
+  "edition": "202601",
+  "name": "Translate Assist",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.10",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "g2-microphone",
+      "desc": "Captures the conversation partner's speech to transcribe and translate it."
+    },
+    {
+      "name": "network",
+      "desc": "Sends audio for transcription and fetches translations and reply suggestions from the Translate Assist backend.",
+      "whitelist": ["https://fbovlyxyyaxiauzxbsjf.supabase.co"]
+    }
+  ],
+  "supported_languages": ["en"]
+}
