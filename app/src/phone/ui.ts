@@ -5,6 +5,7 @@
 // interface is unchanged from the previous shell so main.ts keeps working.
 
 import { mountLive, type LiveView } from "./live";
+import { mountOnboarding, type Onboarding } from "./onboarding";
 import { mountSessions, type SessionsDeps } from "./sessions";
 import { mountSettings, type SettingsDeps } from "./settings";
 import { icon, type IconName } from "./icons";
@@ -12,10 +13,17 @@ import { CSS } from "./styles";
 
 export type TabName = "live" | "sessions" | "settings";
 
+export interface PhoneUiDeps extends SettingsDeps, SessionsDeps {
+  /** First run (no keys, no Pro token) shows the onboarding tier picker. */
+  showOnboarding: boolean;
+}
+
 export interface PhoneUi {
   live: LiveView;
   showTab(tab: TabName): void;
   refreshSessions(): void;
+  refreshSettings(): void;
+  dismissOnboarding(): void;
 }
 
 const TAB_LABEL: Record<TabName, string> = {
@@ -30,10 +38,7 @@ const TAB_ICON: Record<TabName, IconName> = {
   settings: "gear",
 };
 
-export function mountPhoneUi(
-  root: HTMLElement,
-  deps: SettingsDeps & SessionsDeps,
-): PhoneUi {
+export function mountPhoneUi(root: HTMLElement, deps: PhoneUiDeps): PhoneUi {
   const style = document.createElement("style");
   style.textContent = CSS;
   document.head.appendChild(style);
@@ -73,6 +78,7 @@ export function mountPhoneUi(
       el.classList.toggle("active", el.dataset.view === tab);
     }
     if (tab === "sessions") sessions.refresh();
+    if (tab === "settings") settings.refresh();
     // Scroll the freshly-shown view back to the top.
     const content = root.querySelector(".eh-content") as HTMLElement;
     content.scrollTop = 0;
@@ -84,7 +90,33 @@ export function mountPhoneUi(
 
   const live = mountLive(view("live"));
   const sessions = mountSessions(view("sessions"), deps);
-  mountSettings(view("settings"), deps);
+  const settings = mountSettings(view("settings"), deps);
 
-  return { live, showTab, refreshSessions: () => sessions.refresh() };
+  // First run: the tier picker overlays the tabs until either credential
+  // exists (key save or Pro activation dismisses it via main.ts).
+  let onboarding: Onboarding | null = null;
+  if (deps.showOnboarding) {
+    onboarding = mountOnboarding(root, {
+      api: deps.api,
+      licenseStore: deps.licenseStore,
+      onActivated: deps.onActivated,
+      onChooseFree: () => {
+        dismissOnboarding();
+        showTab("settings");
+      },
+    });
+  }
+
+  function dismissOnboarding(): void {
+    onboarding?.dismiss();
+    onboarding = null;
+  }
+
+  return {
+    live,
+    showTab,
+    refreshSessions: () => sessions.refresh(),
+    refreshSettings: () => settings.refresh(),
+    dismissOnboarding,
+  };
 }

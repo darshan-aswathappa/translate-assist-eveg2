@@ -24,7 +24,7 @@ describe("createApiClient", () => {
     const api = createApiClient({ baseUrl: BASE });
 
     const wav = Uint8Array.from([82, 73, 70, 70]);
-    const result = await api.transcribe(wav, { deepgramKey: "dg_test", language: "ja" });
+    const result = await api.transcribe(wav, { auth: { deepgramKey: "dg_test" }, language: "ja" });
 
     expect(result).toEqual({ text: "こんにちは", language: "ja" });
     const { url, init } = lastCall(fetchMock);
@@ -39,7 +39,7 @@ describe("createApiClient", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = createApiClient({ baseUrl: BASE });
 
-    await api.transcribe(new Uint8Array(4), { deepgramKey: "dg_test" });
+    await api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "dg_test" } });
     expect(lastCall(fetchMock).url).toBe(`${BASE}/transcribe`);
   });
 
@@ -49,7 +49,7 @@ describe("createApiClient", () => {
     const api = createApiClient({ baseUrl: BASE });
 
     await api.transcribe(new Uint8Array(4), {
-      deepgramKey: "dg_test",
+      auth: { deepgramKey: "dg_test" },
       language: "ja",
       keyterms: ["Nestor", "Shibuya Station", " ", "HireFeed"],
     });
@@ -68,7 +68,7 @@ describe("createApiClient", () => {
     const api = createApiClient({ baseUrl: BASE });
 
     const result = await api.respond({
-      anthropicKey: "sk-ant-test",
+      auth: { anthropicKey: "sk-ant-test" },
       threadId: "t-1",
       text: "英語を話せますか",
       language: "ja",
@@ -108,11 +108,11 @@ describe("createApiClient", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = createApiClient({ baseUrl: BASE });
 
-    await expect(api.transcribe(new Uint8Array(4), { deepgramKey: "" })).rejects.toThrow(
-      "Set your API keys in Settings",
-    );
     await expect(
-      api.transcribe(new Uint8Array(4), { deepgramKey: "" }),
+      api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "" } }),
+    ).rejects.toThrow("Set your API keys in Settings");
+    await expect(
+      api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "" } }),
     ).rejects.toBeInstanceOf(ApiError);
   });
 
@@ -124,7 +124,7 @@ describe("createApiClient", () => {
     const api = createApiClient({ baseUrl: BASE });
 
     await api.respond({
-      anthropicKey: "sk-ant-test",
+      auth: { anthropicKey: "sk-ant-test" },
       threadId: "t-1",
       text: "こんにちは",
       language: "ja",
@@ -144,7 +144,7 @@ describe("createApiClient", () => {
     const api = createApiClient({ baseUrl: BASE });
 
     await api.respond({
-      anthropicKey: "sk-ant-test",
+      auth: { anthropicKey: "sk-ant-test" },
       threadId: "t-1",
       text: "こんにちは",
       language: "ja",
@@ -164,7 +164,7 @@ describe("createApiClient", () => {
       vi.stubGlobal("fetch", fetchMock);
       const api = createApiClient({ baseUrl: BASE, retries: 2, retryDelayMs: 1 });
 
-      const result = await api.transcribe(new Uint8Array(4), { deepgramKey: "dg" });
+      const result = await api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "dg" } });
       expect(result.text).toBe("hola");
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
@@ -178,7 +178,7 @@ describe("createApiClient", () => {
       const api = createApiClient({ baseUrl: BASE, retries: 2, retryDelayMs: 1 });
 
       const result = await api.respond({
-        anthropicKey: "sk-ant-test",
+        auth: { anthropicKey: "sk-ant-test" },
         threadId: "t-1",
         text: "hola",
         language: "es",
@@ -193,9 +193,9 @@ describe("createApiClient", () => {
       vi.stubGlobal("fetch", fetchMock);
       const api = createApiClient({ baseUrl: BASE, retries: 2, retryDelayMs: 1 });
 
-      await expect(api.transcribe(new Uint8Array(4), { deepgramKey: "x" })).rejects.toThrow(
-        "bad key",
-      );
+      await expect(
+        api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "x" } }),
+      ).rejects.toThrow("bad key");
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
 
@@ -204,8 +204,94 @@ describe("createApiClient", () => {
       vi.stubGlobal("fetch", fetchMock);
       const api = createApiClient({ baseUrl: BASE, retries: 2, retryDelayMs: 1 });
 
-      await expect(api.transcribe(new Uint8Array(4), { deepgramKey: "x" })).rejects.toThrow();
+      await expect(
+        api.transcribe(new Uint8Array(4), { auth: { deepgramKey: "x" } }),
+      ).rejects.toThrow();
       expect(fetchMock).toHaveBeenCalledTimes(3); // first try + 2 retries
+    });
+  });
+
+  describe("pro tier (device token)", () => {
+    it("transcribe sends x-device-token instead of the deepgram key", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse({ text: "hola", language: "es" }));
+      vi.stubGlobal("fetch", fetchMock);
+      const api = createApiClient({ baseUrl: BASE });
+
+      await api.transcribe(new Uint8Array(4), { auth: { deviceToken: "devtok" } });
+      const headers = new Headers(lastCall(fetchMock).init.headers);
+      expect(headers.get("x-device-token")).toBe("devtok");
+      expect(headers.get("x-deepgram-key")).toBeNull();
+    });
+
+    it("respond sends x-device-token instead of the anthropic key", async () => {
+      const fetchMock = vi.fn(async () => jsonResponse({ translation_en: "hi", suggestions: [] }));
+      vi.stubGlobal("fetch", fetchMock);
+      const api = createApiClient({ baseUrl: BASE });
+
+      await api.respond({
+        auth: { deviceToken: "devtok" },
+        threadId: "t-1",
+        text: "hola",
+        language: "es",
+        context: [],
+      });
+      const headers = new Headers(lastCall(fetchMock).init.headers);
+      expect(headers.get("x-device-token")).toBe("devtok");
+      expect(headers.get("x-anthropic-key")).toBeNull();
+    });
+
+    it("activateLicense posts the key and returns the device token", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse({ device_token: "devtok", plan: "monthly" }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const api = createApiClient({ baseUrl: BASE });
+
+      const result = await api.activateLicense("TA-AAAA-BBBB-CCCC-DDDD");
+      expect(result).toEqual({ device_token: "devtok", plan: "monthly" });
+      const { url, init } = lastCall(fetchMock);
+      expect(url).toBe(`${BASE}/license`);
+      expect(JSON.parse(String(init.body))).toEqual({
+        action: "activate",
+        license_key: "TA-AAAA-BBBB-CCCC-DDDD",
+      });
+    });
+
+    it("licenseStatus and reportUsage post the device token", async () => {
+      const status = {
+        plan: "yearly",
+        status: "active",
+        activated_at: null,
+        usage: { audio_seconds: 60, claude_turns: 2 },
+        caps: { audio_seconds: 18000, claude_turns: 1000 },
+      };
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(status))
+        .mockResolvedValueOnce(jsonResponse({ ok: true }));
+      vi.stubGlobal("fetch", fetchMock);
+      const api = createApiClient({ baseUrl: BASE });
+
+      expect(await api.licenseStatus("devtok")).toEqual(status);
+      await api.reportUsage("devtok", 42);
+      expect(JSON.parse(String(lastCall(fetchMock).init.body))).toEqual({
+        action: "report",
+        device_token: "devtok",
+        audio_seconds: 42,
+      });
+    });
+
+    it("mintDgToken posts with the device token header", async () => {
+      const fetchMock = vi.fn(async () =>
+        jsonResponse({ access_token: "jwt", expires_in: 60 }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const api = createApiClient({ baseUrl: BASE });
+
+      expect(await api.mintDgToken("devtok")).toEqual({ access_token: "jwt", expires_in: 60 });
+      const { url, init } = lastCall(fetchMock);
+      expect(url).toBe(`${BASE}/dg-token`);
+      expect(new Headers(init.headers).get("x-device-token")).toBe("devtok");
     });
   });
 });

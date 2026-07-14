@@ -1,8 +1,9 @@
 // Live streaming transcription over Deepgram's WebSocket API (nova-3).
-// The app connects directly (the key is the user's own, entered in Settings,
-// so nothing leaks that the batch proxy doesn't already send). Browser
-// WebSockets can't set headers, so the key travels via the documented
-// `token` subprotocol.
+// The app connects directly in both tiers. Browser WebSockets can't set
+// headers, so the credential travels via the documented subprotocols: free
+// tier sends the user's own API key as ["token", key]; Pro sends a short-lived
+// JWT (minted per-connect by the dg-token edge function, so the server's key
+// never reaches the device) as ["bearer", jwt].
 //
 // Interim results drive the live caption on the HUD; `speech_final` (from
 // Deepgram's audio-based endpointing), `UtteranceEnd` (word-gap timing), and
@@ -144,8 +145,16 @@ export function createSegmentAssembler(handlers: {
   };
 }
 
+/** WS auth subprotocol pair: "token" carries an API key, "bearer" a JWT. The
+ * JWT only needs to be valid at connection-open time, so callers mint a fresh
+ * one before every connect. */
+export interface LiveCredentials {
+  scheme: "token" | "bearer";
+  value: string;
+}
+
 export interface DeepgramLiveOptions {
-  apiKey: string;
+  credentials: LiveCredentials;
   /** Locked thread language; omit to use multilingual code-switching. */
   language?: string;
   /** Domain terms (names, places, jargon) to bias recognition toward. */
@@ -189,7 +198,10 @@ export function connectDeepgramLive(opts: DeepgramLiveOptions): Promise<Deepgram
   });
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${DEEPGRAM_WS_URL}?${params}`, ["token", opts.apiKey]);
+    const ws = new WebSocket(`${DEEPGRAM_WS_URL}?${params}`, [
+      opts.credentials.scheme,
+      opts.credentials.value,
+    ]);
     ws.binaryType = "arraybuffer";
 
     let opened = false;

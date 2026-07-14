@@ -200,6 +200,22 @@ body {
 .eh-turn-sug .mark { color: var(--icon-secondary); margin-right: 4px; }
 .eh-turn-sug div { margin-top: 2px; }
 
+/* ---- onboarding tier picker (full-screen overlay) ---- */
+.eh-onboarding {
+  position: fixed; inset: 0; z-index: 10; background: var(--surface-canvas);
+  overflow-y: auto;
+}
+.eh-onboarding-inner {
+  max-width: 520px; margin: 0 auto;
+  padding: var(--space-4) var(--screen-gutter) calc(var(--space-8) + env(safe-area-inset-bottom));
+}
+
+/* ---- plan / usage (Settings + onboarding) ---- */
+.eh-usage-line { display: flex; justify-content: space-between; font: var(--text-caption); color: var(--text-secondary); margin-top: var(--space-3); }
+.eh-progress { height: 6px; background: var(--gray-150); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.eh-progress span { display: block; height: 100%; background: var(--gray-900); border-radius: 3px; }
+.eh-progress.warn span { background: var(--signal-red); }
+
 .eh-row-back { display: flex; align-items: center; gap: 6px; padding: 6px 0 var(--space-3); }
 .eh-row-back button { background: none; border: none; color: var(--text-primary); cursor: pointer; display: flex; }
 

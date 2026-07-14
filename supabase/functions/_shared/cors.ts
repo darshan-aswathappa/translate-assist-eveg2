@@ -5,7 +5,7 @@
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-deepgram-key, x-anthropic-key",
+    "authorization, x-client-info, apikey, content-type, x-deepgram-key, x-anthropic-key, x-device-token",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
 } as const;
 

@@ -1,10 +1,23 @@
-// Typed fetch wrappers for the three Supabase Edge Functions. The user's
-// Deepgram / Anthropic keys travel per-request in headers (x-deepgram-key /
-// x-anthropic-key) — the functions are pass-through proxies and never store
-// them. Every call has an abort timeout so a dead network can't hang the HUD,
+// Typed fetch wrappers for the Supabase Edge Functions. Two auth modes travel
+// per-request in headers: free tier sends the user's own keys (x-deepgram-key /
+// x-anthropic-key — pass-through, never stored), Pro sends the device token
+// from a redeemed license (x-device-token — the server uses its own provider
+// keys). Every call has an abort timeout so a dead network can't hang the HUD,
 // and transient failures (network drop, 5xx) are retried with backoff.
 
 import type { Suggestion } from "../conversation/thread";
+
+/** Free tier carries the user's provider key; Pro carries the device token. */
+export type TranscribeAuth = { deepgramKey: string } | { deviceToken: string };
+export type RespondAuth = { anthropicKey: string } | { deviceToken: string };
+
+function authHeader(
+  auth: TranscribeAuth | RespondAuth,
+  keyHeader: string,
+): Record<string, string> {
+  if ("deviceToken" in auth) return { "x-device-token": auth.deviceToken };
+  return { [keyHeader]: "deepgramKey" in auth ? auth.deepgramKey : auth.anthropicKey };
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -49,6 +62,19 @@ export interface UtteranceRow {
 
 export interface ThreadDetail extends ThreadSummary {
   utterances: UtteranceRow[];
+}
+
+export interface UsageTotals {
+  audio_seconds: number;
+  claude_turns: number;
+}
+
+export interface LicenseStatus {
+  plan: "monthly" | "yearly";
+  status: "active" | "past_due" | "canceled";
+  activated_at: string | null;
+  usage: UsageTotals;
+  caps: UsageTotals;
 }
 
 export interface ApiClientOptions {
@@ -127,10 +153,10 @@ export function createApiClient(opts: ApiClientOptions) {
     async transcribe(
       wav: Uint8Array,
       {
-        deepgramKey,
+        auth,
         language,
         keyterms,
-      }: { deepgramKey: string; language?: string; keyterms?: readonly string[] },
+      }: { auth: TranscribeAuth; language?: string; keyterms?: readonly string[] },
     ): Promise<TranscribeResult> {
       const params = new URLSearchParams();
       if (language) params.set("language", language);
@@ -143,7 +169,7 @@ export function createApiClient(opts: ApiClientOptions) {
         `${base}/transcribe${qs}`,
         {
           method: "POST",
-          headers: { "content-type": "audio/wav", "x-deepgram-key": deepgramKey },
+          headers: { "content-type": "audio/wav", ...authHeader(auth, "x-deepgram-key") },
           // A Blob (not a bare ArrayBuffer) — the iOS/WebKit WebView the glasses
           // app runs in fails a fetch with an ArrayBuffer body ("Load failed",
           // the POST never leaves the device), while a Blob uploads reliably.
@@ -154,7 +180,7 @@ export function createApiClient(opts: ApiClientOptions) {
     },
 
     async respond(params: {
-      anthropicKey: string;
+      auth: RespondAuth;
       threadId: string;
       text: string;
       language: string;
@@ -166,7 +192,7 @@ export function createApiClient(opts: ApiClientOptions) {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-anthropic-key": params.anthropicKey,
+          ...authHeader(params.auth, "x-anthropic-key"),
         },
         body: JSON.stringify({
           thread_id: params.threadId,
@@ -197,6 +223,49 @@ export function createApiClient(opts: ApiClientOptions) {
 
     async deleteThread(id: string): Promise<void> {
       await call(`${base}/threads?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    },
+
+    /** Redeem a Pro license key (one-time) for this device's token. */
+    async activateLicense(
+      licenseKey: string,
+    ): Promise<{ device_token: string; plan: "monthly" | "yearly" }> {
+      return call(`${base}/license`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "activate", license_key: licenseKey }),
+      });
+    },
+
+    async licenseStatus(deviceToken: string): Promise<LicenseStatus> {
+      return call(`${base}/license`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "status", device_token: deviceToken }),
+      });
+    },
+
+    /** Report live-streamed audio seconds (the WebSocket bypasses our proxy,
+     * so streaming usage is client-metered). */
+    async reportUsage(deviceToken: string, audioSeconds: number): Promise<void> {
+      await call(`${base}/license`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "report",
+          device_token: deviceToken,
+          audio_seconds: audioSeconds,
+        }),
+      });
+    },
+
+    /** Mint a short-lived Deepgram token for one Pro live-streaming connect. */
+    async mintDgToken(
+      deviceToken: string,
+    ): Promise<{ access_token: string; expires_in: number }> {
+      return call(`${base}/dg-token`, {
+        method: "POST",
+        headers: { "x-device-token": deviceToken },
+      });
     },
   };
 }

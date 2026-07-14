@@ -14,6 +14,11 @@ export const SUPABASE_PUBLISHABLE_KEY = env.VITE_SUPABASE_PUBLISHABLE_KEY ?? "";
 
 export const FUNCTIONS_BASE = `${SUPABASE_URL}/functions/v1`;
 
+// Stripe Payment Link URLs for the Pro tier (created once in the Stripe
+// dashboard/MCP; static, so they ship as build-time env).
+export const CHECKOUT_URL_MONTHLY = env.VITE_CHECKOUT_URL_MONTHLY ?? "";
+export const CHECKOUT_URL_YEARLY = env.VITE_CHECKOUT_URL_YEARLY ?? "";
+
 // A transcription of one utterance is a single short request; translation can
 // take a couple of seconds of Claude thinking time.
 export const TRANSCRIBE_TIMEOUT_MS = 20_000;
@@ -25,4 +30,6 @@ export const STORAGE_KEYS = {
   anthropicKey: "ta.anthropic_key",
   activeThreadId: "ta.active_thread",
   keyterms: "ta.keyterms",
+  deviceToken: "ta.device_token",
+  plan: "ta.plan",
 } as const;

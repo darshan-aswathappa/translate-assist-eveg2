@@ -1,6 +1,9 @@
 // POST /transcribe[?language=xx] — body: audio/wav bytes.
-// Pass-through proxy to Deepgram's pre-recorded API (nova-3). The user's
-// Deepgram key arrives in x-deepgram-key and is forwarded, never stored.
+// Pass-through proxy to Deepgram's pre-recorded API (nova-3). Two auth modes:
+// free tier sends the user's own key in x-deepgram-key (forwarded, never
+// stored); Pro sends x-device-token, which resolves to an active license and
+// uses the server's DEEPGRAM_API_KEY, with the audio length metered against
+// the monthly fair-use cap.
 // Returns { text, language } where language is an ISO-639-1 code suitable for
 // the thread language lock. Deepgram already reports ISO-639-1 codes, so no
 // name→code mapping is needed. When a locked language is passed it is sent as a
@@ -9,6 +12,7 @@
 // recognition (nova-3 keyterm prompting).
 
 import { errorJson, json, preflight } from "../_shared/cors.ts";
+import { meterUsage, resolveProAuth } from "../_shared/license.ts";
 
 const DEEPGRAM_URL = "https://api.deepgram.com/v1/listen";
 const MODEL = "nova-3";
@@ -34,7 +38,15 @@ Deno.serve(async (req: Request) => {
   if (pre) return pre;
   if (req.method !== "POST") return errorJson("Method not allowed", 405);
 
-  const deepgramKey = req.headers.get("x-deepgram-key") ?? "";
+  // Pro (device token) resolves to the server's key; free forwards the user's.
+  let deepgramKey = req.headers.get("x-deepgram-key") ?? "";
+  let proLicenseId: string | null = null;
+  if (req.headers.get("x-device-token")) {
+    const auth = await resolveProAuth(req, { audioCap: true });
+    if (auth instanceof Response) return auth;
+    proLicenseId = auth.license.id;
+    deepgramKey = Deno.env.get("DEEPGRAM_API_KEY") ?? "";
+  }
   if (!deepgramKey) return errorJson("Set your API keys in Settings", 401);
 
   const audio = new Uint8Array(await req.arrayBuffer());
@@ -71,9 +83,17 @@ Deno.serve(async (req: Request) => {
   if (!res.ok) {
     const detail = await res.text().catch(() => "");
     console.error("deepgram error", res.status, detail.slice(0, 500));
-    if (res.status === 401) return errorJson("Deepgram rejected your API key — check Settings", 401);
+    if (res.status === 401) {
+      return proLicenseId
+        ? errorJson("Transcription unavailable — try again later", 502)
+        : errorJson("Deepgram rejected your API key — check Settings", 401);
+    }
     return errorJson(`Transcription failed (${res.status})`, 502);
   }
+
+  // Meter Pro usage on success: 16 kHz × 16-bit mono WAV is 32,000 bytes/s
+  // (the 44-byte header is noise at this scale).
+  if (proLicenseId) void meterUsage(proLicenseId, Math.round(audio.length / 32_000), 0);
 
   const body = (await res.json()) as DeepgramResponse;
   const channel = body.results?.channels?.[0];

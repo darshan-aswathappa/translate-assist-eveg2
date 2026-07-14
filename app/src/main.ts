@@ -32,6 +32,7 @@ import {
   connectDeepgramLive,
   modelLanguageFor,
   type DeepgramLive,
+  type LiveCredentials,
   type LiveSegment,
 } from "./api/deepgramLive";
 import { startCapture, type AudioCapture } from "./audio/capture";
@@ -56,7 +57,10 @@ import { clampIndex, hudText, paneCount } from "./glasses/layout";
 import { actionForEvent } from "./glasses/input";
 import { createPage, initRender, updateHud } from "./glasses/render";
 import { createKeyStore, type UserKeys } from "./phone/keys";
+import { createLicenseStore } from "./phone/license";
 import { mountPhoneUi, type PhoneUi } from "./phone/ui";
+import { resolveCredentials, type Credentials } from "./tier";
+import { createUsageReporter } from "./usageReporter";
 import { runDevFixtures } from "./devFixtures";
 
 // How long after the end-turn tap to give Deepgram's Finalize response before
@@ -75,11 +79,15 @@ const api = createApiClient({
   retries: 2,
 });
 const keyStore = createKeyStore(bridge);
+const licenseStore = createLicenseStore(bridge);
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let conversation: Conversation = initialConversation();
 let keys: UserKeys = { deepgramKey: "", anthropicKey: "" };
+// Pro device token from a redeemed license; wins over BYOK keys (see tier.ts).
+let deviceToken = "";
+let credentials: Credentials | null = null;
 // Domain terms (names, places, jargon) from Settings; biases both transcription
 // paths. Applied at connect time, so an in-session edit takes effect on the next
 // streaming reconnect (or immediately on the batch path).
@@ -114,6 +122,52 @@ let turnSeq = 0;
 // Everything transcribed since the last end-turn tap; flushed as one turn.
 const turnBuffer = createTurnBuffer();
 
+// ─── Credentials ─────────────────────────────────────────────────────────────
+
+// Loaded before the UI mounts so onboarding shows only on a true first run.
+if (!DEV_MODE) {
+  [keys, keyterms, deviceToken] = await Promise.all([
+    keyStore.getKeys(),
+    keyStore.getKeyterms(),
+    licenseStore.getDeviceToken(),
+  ]);
+  credentials = resolveCredentials(keys, deviceToken);
+}
+
+/** Auth for the batch/respond calls, per the active tier. */
+function transcribeAuth(): { deepgramKey: string } | { deviceToken: string } {
+  return credentials?.tier === "pro"
+    ? { deviceToken: credentials.deviceToken }
+    : { deepgramKey: keys.deepgramKey };
+}
+
+function respondAuth(): { anthropicKey: string } | { deviceToken: string } {
+  return credentials?.tier === "pro"
+    ? { deviceToken: credentials.deviceToken }
+    : { anthropicKey: keys.anthropicKey };
+}
+
+/** Live-streaming credential: Pro mints a fresh short-lived Deepgram JWT for
+ * every connect (the server key never reaches the device); free uses the
+ * user's own key. */
+async function liveCredentials(): Promise<LiveCredentials> {
+  if (credentials?.tier === "pro") {
+    const { access_token } = await api.mintDgToken(credentials.deviceToken);
+    return { scheme: "bearer", value: access_token };
+  }
+  return { scheme: "token", value: keys.deepgramKey };
+}
+
+// Pro streaming bypasses our proxy, so the app meters the PCM it sends and
+// reports it periodically (and on connection close).
+const streamUsage = createUsageReporter((seconds) => {
+  if (credentials?.tier !== "pro") return;
+  api.reportUsage(credentials.deviceToken, seconds).catch((err) => {
+    console.error("usage report failed:", err);
+  });
+});
+setInterval(() => streamUsage.flush(), 60_000);
+
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
 function showStatus(label: string): void {
@@ -144,16 +198,48 @@ function showResult(): void {
 
 const ui: PhoneUi = mountPhoneUi(document.getElementById("app") as HTMLElement, {
   keyStore,
+  licenseStore,
   api,
+  showOnboarding: !DEV_MODE && credentials === null,
   getActiveThreadId: () => conversation.threadId,
   onKeysSaved: (saved) => {
     keys = saved;
+    credentials = resolveCredentials(keys, deviceToken);
+    ui.dismissOnboarding();
     // Load keyterms before any first pipeline start so the initial connection
     // already carries them.
     void (async () => {
       keyterms = await keyStore.getKeyterms();
       if (!pipelineStarted) void startPipeline();
     })();
+  },
+  onKeytermsSaved: (terms) => {
+    keyterms = terms;
+  },
+  onActivated: (token) => {
+    deviceToken = token;
+    credentials = resolveCredentials(keys, deviceToken);
+    ui.dismissOnboarding();
+    // A live free-tier stream keeps its key until the next reconnect; new
+    // batch/respond calls switch to the device token immediately.
+    if (!pipelineStarted) void startPipeline();
+  },
+  onProRemoved: () => {
+    streamUsage.flush();
+    deviceToken = "";
+    credentials = resolveCredentials(keys, deviceToken);
+    if (live) {
+      // Force the next connect to pick up the new credentials (or stop).
+      live.close();
+      live = null;
+    }
+    if (!credentials) {
+      showStatus("CHOOSE A PLAN ON PHONE");
+      return;
+    }
+    if (pipelineStarted && mode === "streaming") {
+      startStreaming().catch(() => handleStreamingDrop());
+    }
   },
   onNewSession: async () => {
     const { id } = await api.createThread();
@@ -183,7 +269,15 @@ function describeError(err: unknown): string {
 
 function showPipelineError(err: unknown, label = "ERROR — STILL LISTENING"): void {
   console.error("pipeline error:", err);
-  if (err instanceof ApiError && err.status === 401) label = "CHECK API KEYS ON PHONE";
+  if (err instanceof ApiError) {
+    if (err.status === 401) {
+      label = credentials?.tier === "pro" ? "PRO INACTIVE — CHECK PHONE" : "CHECK API KEYS ON PHONE";
+    } else if (err.status === 403) {
+      label = "SUBSCRIPTION INACTIVE — CHECK PHONE";
+    } else if (err.status === 429) {
+      label = "MONTHLY LIMIT REACHED";
+    }
+  }
   showStatus(label);
   ui.live.setError(describeError(err));
 }
@@ -259,7 +353,7 @@ async function translateSegment(seg: LiveSegment): Promise<void> {
     ui.live.setError(null);
     const context = recentContext(conversation, 10);
     const r = await api.respond({
-      anthropicKey: keys.anthropicKey,
+      auth: respondAuth(),
       threadId: conversation.threadId,
       text: seg.text,
       language,
@@ -305,7 +399,7 @@ async function fetchSuggestions(
   let suggestions: Suggestion[] = [];
   try {
     const r = await api.respond({
-      anthropicKey: keys.anthropicKey,
+      auth: respondAuth(),
       threadId: conversation.threadId ?? "",
       text: original,
       language,
@@ -334,7 +428,7 @@ async function transcribeUtterance(pcm: Uint8Array): Promise<void> {
     if (phase === "listening") showStatus("TRANSCRIBING");
     const wav = pcmToWav(pcm);
     const t = await api.transcribe(wav, {
-      deepgramKey: keys.deepgramKey,
+      auth: transcribeAuth(),
       language: modelLanguageFor(conversation.lockedLanguage),
       keyterms,
     });
@@ -368,7 +462,7 @@ function switchToBatch(): void {
 
 async function startStreaming(): Promise<void> {
   const connection = await connectDeepgramLive({
-    apiKey: keys.deepgramKey,
+    credentials: await liveCredentials(),
     language: modelLanguageFor(conversation.lockedLanguage),
     keyterms,
     onInterim: (text) => {
@@ -382,13 +476,17 @@ async function startStreaming(): Promise<void> {
     },
     onClose: () => {
       live = null;
+      streamUsage.flush();
       handleStreamingDrop();
     },
   });
   live = connection;
   if (!gate) {
     gate = createSpeechGate({
-      onAudio: (frame) => live?.sendPcm(frame),
+      onAudio: (frame) => {
+        live?.sendPcm(frame);
+        if (credentials?.tier === "pro") streamUsage.addBytes(frame.byteLength);
+      },
       onGateClose: () => {
         // Flush anything Deepgram is still buffering into the turn buffer so
         // the tail isn't stuck when the end-turn tap comes later.
@@ -451,6 +549,7 @@ function teardown(): void {
   void capture?.stop();
   live?.close();
   live = null;
+  streamUsage.flush();
 }
 
 const unsubscribe = bridge.onEvenHubEvent((event) => {
@@ -505,12 +604,10 @@ if (DEV_MODE) {
     showStatus,
     ui,
   });
+} else if (credentials) {
+  // Keys/token were loaded before the UI mounted (see Credentials section).
+  void startPipeline();
 } else {
-  [keys, keyterms] = await Promise.all([keyStore.getKeys(), keyStore.getKeyterms()]);
-  if (keys.deepgramKey && keys.anthropicKey) {
-    void startPipeline();
-  } else {
-    showStatus("SET API KEYS ON PHONE");
-    ui.showTab("settings");
-  }
+  // No tier chosen yet — the onboarding overlay is showing on the phone.
+  showStatus("CHOOSE A PLAN ON PHONE");
 }

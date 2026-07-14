@@ -7,11 +7,14 @@
 //   "suggest"        — 3 suggested replies for an already-translated utterance;
 //                      attaches them to the row named by utterance_id.
 // Persists to Postgres (service role) and locks the thread's language on first
-// use. The user's Anthropic key arrives in x-anthropic-key and is forwarded,
-// never stored.
+// use. Two auth modes: free tier sends the user's Anthropic key in
+// x-anthropic-key (forwarded, never stored); Pro sends x-device-token, which
+// resolves to an active license and uses the server's ANTHROPIC_API_KEY, with
+// each call metered as one Claude turn against the monthly fair-use cap.
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { errorJson, json, preflight } from "../_shared/cors.ts";
+import { meterUsage, resolveProAuth } from "../_shared/license.ts";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const MODEL = "claude-sonnet-4-6";
@@ -105,7 +108,15 @@ Deno.serve(async (req: Request) => {
   if (pre) return pre;
   if (req.method !== "POST") return errorJson("Method not allowed", 405);
 
-  const anthropicKey = req.headers.get("x-anthropic-key") ?? "";
+  // Pro (device token) resolves to the server's key; free forwards the user's.
+  let anthropicKey = req.headers.get("x-anthropic-key") ?? "";
+  let proLicenseId: string | null = null;
+  if (req.headers.get("x-device-token")) {
+    const auth = await resolveProAuth(req, { turnCap: true });
+    if (auth instanceof Response) return auth;
+    proLicenseId = auth.license.id;
+    anthropicKey = Deno.env.get("ANTHROPIC_API_KEY") ?? "";
+  }
   if (!anthropicKey) return errorJson("Set your API keys in Settings", 401);
 
   let body: {
@@ -165,10 +176,16 @@ Deno.serve(async (req: Request) => {
     const detail = await res.text().catch(() => "");
     console.error("anthropic error", res.status, detail.slice(0, 500));
     if (res.status === 401) {
-      return errorJson("Anthropic rejected your API key — check Settings", 401);
+      return proLicenseId
+        ? errorJson("Translation unavailable — try again later", 502)
+        : errorJson("Anthropic rejected your API key — check Settings", 401);
     }
     return errorJson(`Translation failed (${res.status})`, 502);
   }
+
+  // Meter Pro usage on success: one Claude turn per call (translate and
+  // suggest each count — the cap is sized for both halves of a turn).
+  if (proLicenseId) void meterUsage(proLicenseId, 0, 1);
 
   const completion = (await res.json()) as {
     content?: Array<{ type: string; text?: string }>;
