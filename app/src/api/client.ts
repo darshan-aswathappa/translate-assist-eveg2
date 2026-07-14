@@ -126,9 +126,19 @@ export function createApiClient(opts: ApiClientOptions) {
   return {
     async transcribe(
       wav: Uint8Array,
-      { deepgramKey, language }: { deepgramKey: string; language?: string },
+      {
+        deepgramKey,
+        language,
+        keyterms,
+      }: { deepgramKey: string; language?: string; keyterms?: readonly string[] },
     ): Promise<TranscribeResult> {
-      const qs = language ? `?language=${encodeURIComponent(language)}` : "";
+      const params = new URLSearchParams();
+      if (language) params.set("language", language);
+      for (const term of keyterms ?? []) {
+        const trimmed = term.trim();
+        if (trimmed) params.append("keyterm", trimmed);
+      }
+      const qs = params.toString() ? `?${params}` : "";
       return call<TranscribeResult>(
         `${base}/transcribe${qs}`,
         {

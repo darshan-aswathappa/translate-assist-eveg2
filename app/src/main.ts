@@ -7,8 +7,12 @@
 // keeps dropping, the app falls back to the batch path: VAD utterance
 // segmentation → WAV → edge fn `transcribe` (Deepgram pre-recorded REST).
 //
-// The speaker's language locks after the first non-English detection. Swipe
-// cycles translation pages + replies, tap pauses the mic, double-tap exits.
+// The speaker's language locks after the first non-English detection (for the
+// UI badge and Claude's source-language hint); the transcription model itself
+// stays multilingual for the languages nova-3 covers so code-switching keeps
+// working, and only pins a monolingual model for languages outside that set —
+// see modelLanguageFor. Swipe cycles translation pages + replies, tap pauses
+// the mic, double-tap exits.
 // The phone shows Live/Sessions/Settings.
 
 import { waitForEvenAppBridge } from "@evenrealities/even_hub_sdk";
@@ -19,7 +23,12 @@ import {
   TRANSCRIBE_TIMEOUT_MS,
 } from "./config";
 import { createApiClient, ApiError } from "./api/client";
-import { connectDeepgramLive, type DeepgramLive, type LiveSegment } from "./api/deepgramLive";
+import {
+  connectDeepgramLive,
+  modelLanguageFor,
+  type DeepgramLive,
+  type LiveSegment,
+} from "./api/deepgramLive";
 import { startCapture, type AudioCapture } from "./audio/capture";
 import {
   createSpeechGate,
@@ -68,6 +77,10 @@ const keyStore = createKeyStore(bridge);
 
 let conversation: Conversation = initialConversation();
 let keys: UserKeys = { deepgramKey: "", anthropicKey: "" };
+// Domain terms (names, places, jargon) from Settings; biases both transcription
+// paths. Applied at connect time, so an in-session edit takes effect on the next
+// streaming reconnect (or immediately on the batch path).
+let keyterms: string[] = [];
 let paused = false;
 let pipelineStarted = false;
 let mode: "streaming" | "batch" = "streaming";
@@ -128,7 +141,12 @@ const ui: PhoneUi = mountPhoneUi(document.getElementById("app") as HTMLElement, 
   getActiveThreadId: () => conversation.threadId,
   onKeysSaved: (saved) => {
     keys = saved;
-    if (!pipelineStarted) void startPipeline();
+    // Load keyterms before any first pipeline start so the initial connection
+    // already carries them.
+    void (async () => {
+      keyterms = await keyStore.getKeyterms();
+      if (!pipelineStarted) void startPipeline();
+    })();
   },
   onNewSession: async () => {
     const { id } = await api.createThread();
@@ -302,7 +320,8 @@ async function transcribeUtterance(pcm: Uint8Array): Promise<void> {
     const wav = pcmToWav(pcm);
     const t = await api.transcribe(wav, {
       deepgramKey: keys.deepgramKey,
-      language: conversation.lockedLanguage ?? undefined,
+      language: modelLanguageFor(conversation.lockedLanguage),
+      keyterms,
     });
     if (!t.text) {
       showStatus("LISTENING");
@@ -334,7 +353,8 @@ function switchToBatch(): void {
 async function startStreaming(): Promise<void> {
   const connection = await connectDeepgramLive({
     apiKey: keys.deepgramKey,
-    language: conversation.lockedLanguage ?? undefined,
+    language: modelLanguageFor(conversation.lockedLanguage),
+    keyterms,
     onInterim: (text) => {
       if (!paused) showCaption(text);
     },
@@ -478,7 +498,7 @@ if (DEV_MODE) {
     ui,
   });
 } else {
-  keys = await keyStore.getKeys();
+  [keys, keyterms] = await Promise.all([keyStore.getKeys(), keyStore.getKeyterms()]);
   if (keys.deepgramKey && keys.anthropicKey) {
     void startPipeline();
   } else {

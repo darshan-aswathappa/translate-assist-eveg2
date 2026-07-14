@@ -24,4 +24,5 @@ export const STORAGE_KEYS = {
   deepgramKey: "ta.deepgram_key",
   anthropicKey: "ta.anthropic_key",
   activeThreadId: "ta.active_thread",
+  keyterms: "ta.keyterms",
 } as const;

@@ -43,6 +43,21 @@ describe("createApiClient", () => {
     expect(lastCall(fetchMock).url).toBe(`${BASE}/transcribe`);
   });
 
+  it("transcribe forwards keyterms as repeated query params", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ text: "hi", language: "ja" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApiClient({ baseUrl: BASE });
+
+    await api.transcribe(new Uint8Array(4), {
+      deepgramKey: "dg_test",
+      language: "ja",
+      keyterms: ["Nestor", "Shibuya Station", " ", "HireFeed"],
+    });
+    const url = new URL(lastCall(fetchMock).url);
+    expect(url.searchParams.get("language")).toBe("ja");
+    expect(url.searchParams.getAll("keyterm")).toEqual(["Nestor", "Shibuya Station", "HireFeed"]);
+  });
+
   it("respond posts thread context with anthropic key and parses suggestions", async () => {
     const payload = {
       translation_en: "Do you speak English?",

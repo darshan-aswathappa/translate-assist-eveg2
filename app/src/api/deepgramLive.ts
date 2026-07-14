@@ -15,12 +15,46 @@ const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/listen";
 const MODEL = "nova-3";
 const CONNECT_TIMEOUT_MS = 8_000;
 // Deepgram drops connections after ~10s without audio; keepalives hold it open
-// while the speech gate is closed.
-const KEEPALIVE_INTERVAL_MS = 5_000;
-// Must stay below the speech gate's hangover so `speech_final` fires from real
+// while the speech gate is closed. Kept comfortably below the 10s timeout so a
+// single delayed tick can't trip it.
+const KEEPALIVE_INTERVAL_MS = 4_000;
+// Silence (ms) that finalizes a segment. In multilingual mode Deepgram
+// recommends a short value so segments split at language boundaries and words
+// are attributed to the right language; when locked to one language we favour
+// fuller clauses (better machine translation) with a longer gap. Both stay
+// below the speech gate's hangover so `speech_final` fires from real
 // transmitted silence before we stop sending audio.
-const ENDPOINTING_MS = 300;
-const UTTERANCE_END_MS = 1_200;
+const ENDPOINTING_MULTI_MS = 100;
+const ENDPOINTING_LOCKED_MS = 300;
+// Fallback segment boundary from a gap in word timings, for long monologues
+// with internal pauses where `speech_final` hasn't fired. 1000ms is the floor
+// worth using — interim results arrive ~1s apart, so anything lower is moot.
+const UTTERANCE_END_MS = 1_000;
+
+// The 10 languages nova-3's multilingual (code-switching) model covers.
+const MULTI_LANGUAGES: ReadonlySet<string> = new Set([
+  "en",
+  "es",
+  "fr",
+  "de",
+  "hi",
+  "it",
+  "ja",
+  "nl",
+  "ru",
+  "pt",
+]);
+
+// Which `language` to send Deepgram for a thread's detected primary language.
+// `undefined` selects the multilingual model (code-switching stays on); a code
+// pins the monolingual model. We stay multilingual whenever the primary
+// language is one the multi model covers, so the wearer's English and any
+// code-switching are still transcribed accurately; we only pin a monolingual
+// model for languages outside that set (e.g. Korean, Mandarin).
+export function modelLanguageFor(locked: string | null | undefined): string | undefined {
+  if (!locked || MULTI_LANGUAGES.has(locked)) return undefined;
+  return locked;
+}
 
 export interface LiveSegment {
   text: string;
@@ -114,6 +148,8 @@ export interface DeepgramLiveOptions {
   apiKey: string;
   /** Locked thread language; omit to use multilingual code-switching. */
   language?: string;
+  /** Domain terms (names, places, jargon) to bias recognition toward. */
+  keyterms?: readonly string[];
   onInterim: (text: string) => void;
   onSegment: (segment: LiveSegment) => void;
   /** Fired on any close after a successful open (clean or not). */
@@ -128,6 +164,7 @@ export interface DeepgramLive {
 }
 
 export function connectDeepgramLive(opts: DeepgramLiveOptions): Promise<DeepgramLive> {
+  const multilingual = opts.language === undefined;
   const params = new URLSearchParams({
     model: MODEL,
     encoding: "linear16",
@@ -135,10 +172,15 @@ export function connectDeepgramLive(opts: DeepgramLiveOptions): Promise<Deepgram
     channels: "1",
     smart_format: "true",
     interim_results: "true",
-    endpointing: String(ENDPOINTING_MS),
+    endpointing: String(multilingual ? ENDPOINTING_MULTI_MS : ENDPOINTING_LOCKED_MS),
     utterance_end_ms: String(UTTERANCE_END_MS),
     language: opts.language ?? "multi",
   });
+  // Keyterm prompting is a repeated `keyterm` param (no weights, one per term).
+  for (const term of opts.keyterms ?? []) {
+    const trimmed = term.trim();
+    if (trimmed) params.append("keyterm", trimmed);
+  }
 
   const assembler = createSegmentAssembler({
     onInterim: opts.onInterim,

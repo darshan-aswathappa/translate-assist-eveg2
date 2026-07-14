@@ -6,7 +6,7 @@
 import { createApiClient } from "../api/client";
 import { pcmToWav } from "../audio/wav";
 import { FUNCTIONS_BASE } from "../config";
-import { isValidDeepgramKey, maskKey, type KeyStore, type UserKeys } from "./keys";
+import { isValidDeepgramKey, maskKey, parseKeyterms, type KeyStore, type UserKeys } from "./keys";
 
 export interface SettingsDeps {
   keyStore: KeyStore;
@@ -27,6 +27,11 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
         <input class="eh-input" type="password" data-key="anthropic" placeholder="sk-ant-…" autocomplete="off" />
         <div class="eh-hint" data-hint="anthropic"></div>
       </div>
+      <div class="eh-field">
+        <label class="eh-label">Key terms — names, places, jargon (one per line)</label>
+        <textarea class="eh-input" data-key="keyterms" rows="3" placeholder="e.g. Nestor&#10;Shibuya&#10;HireFeed" autocomplete="off"></textarea>
+        <div class="eh-hint">Boosts recognition of these words across languages. Optional; up to 50.</div>
+      </div>
       <button class="eh-btn accent" data-action="save" style="width:100%">Save keys</button>
       <div class="eh-msg" data-msg></div>
     </div>
@@ -38,6 +43,7 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
 
   const deepgramInput = root.querySelector('[data-key="deepgram"]') as HTMLInputElement;
   const anthropicInput = root.querySelector('[data-key="anthropic"]') as HTMLInputElement;
+  const keytermsInput = root.querySelector('[data-key="keyterms"]') as HTMLTextAreaElement;
   const deepgramHint = root.querySelector('[data-hint="deepgram"]') as HTMLElement;
   const anthropicHint = root.querySelector('[data-hint="anthropic"]') as HTMLElement;
   const saveBtn = root.querySelector('[data-action="save"]') as HTMLButtonElement;
@@ -51,10 +57,16 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
   }
 
   void deps.keyStore.getKeys().then(showSaved);
+  void deps.keyStore.getKeyterms().then((terms) => {
+    keytermsInput.value = terms.join("\n");
+  });
 
   saveBtn.addEventListener("click", () => {
     void (async () => {
       msg.classList.remove("err", "ok");
+      // Keyterms need no verification and shouldn't depend on the keys being
+      // valid, so persist them up front — edits always stick.
+      await deps.keyStore.setKeyterms(parseKeyterms(keytermsInput.value));
       const existing = await deps.keyStore.getKeys();
       // Empty input = keep the currently saved key; typed input replaces it.
       const keys: UserKeys = {

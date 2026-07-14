@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createSegmentAssembler, type LiveSegment } from "./deepgramLive";
+import { createSegmentAssembler, modelLanguageFor, type LiveSegment } from "./deepgramLive";
 
 function results(
   transcript: string,
@@ -105,5 +105,25 @@ describe("createSegmentAssembler", () => {
     assembler.handleMessage(results("cut off mid", { isFinal: true }));
     assembler.flush();
     expect(segments).toEqual([{ text: "cut off mid", language: "" }]);
+  });
+});
+
+describe("modelLanguageFor", () => {
+  it("uses the multilingual model (undefined) before any language locks", () => {
+    expect(modelLanguageFor(null)).toBeUndefined();
+    expect(modelLanguageFor(undefined)).toBeUndefined();
+    expect(modelLanguageFor("")).toBeUndefined();
+  });
+
+  it("stays multilingual for languages the multi model covers", () => {
+    expect(modelLanguageFor("ja")).toBeUndefined();
+    expect(modelLanguageFor("es")).toBeUndefined();
+    expect(modelLanguageFor("en")).toBeUndefined();
+  });
+
+  it("pins the monolingual model for languages outside the multi set", () => {
+    expect(modelLanguageFor("ko")).toBe("ko");
+    expect(modelLanguageFor("zh")).toBe("zh");
+    expect(modelLanguageFor("el")).toBe("el");
   });
 });

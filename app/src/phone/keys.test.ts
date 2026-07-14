@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createKeyStore, isValidDeepgramKey, maskKey } from "./keys";
+import { createKeyStore, isValidDeepgramKey, maskKey, parseKeyterms } from "./keys";
 
 // Fake of the two bridge storage methods the store uses.
 function fakeBridge() {
@@ -31,6 +31,40 @@ describe("createKeyStore", () => {
     const store = createKeyStore(fakeBridge());
     await store.setKeys({ deepgramKey: "  dg_abc\n", anthropicKey: " sk-ant-xyz " });
     expect(await store.getKeys()).toEqual({ deepgramKey: "dg_abc", anthropicKey: "sk-ant-xyz" });
+  });
+
+  it("round-trips keyterms, normalized", async () => {
+    const store = createKeyStore(fakeBridge());
+    await store.setKeyterms(["Nestor", " Shibuya ", "Nestor"]);
+    expect(await store.getKeyterms()).toEqual(["Nestor", "Shibuya"]);
+  });
+
+  it("returns no keyterms when nothing is stored", async () => {
+    const store = createKeyStore(fakeBridge());
+    expect(await store.getKeyterms()).toEqual([]);
+  });
+});
+
+describe("parseKeyterms", () => {
+  it("splits on newlines and commas, trimming empties", () => {
+    expect(parseKeyterms("Nestor\nShibuya, HireFeed\n\n")).toEqual([
+      "Nestor",
+      "Shibuya",
+      "HireFeed",
+    ]);
+  });
+
+  it("de-duplicates case-insensitively, keeping first spelling", () => {
+    expect(parseKeyterms("Tokyo\ntokyo\nTOKYO")).toEqual(["Tokyo"]);
+  });
+
+  it("caps the list at 50 terms", () => {
+    const many = Array.from({ length: 60 }, (_, i) => `term${i}`).join("\n");
+    expect(parseKeyterms(many)).toHaveLength(50);
+  });
+
+  it("is empty for blank input", () => {
+    expect(parseKeyterms("   \n , \n")).toEqual([]);
   });
 });
 

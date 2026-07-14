@@ -5,6 +5,8 @@
 // the thread language lock. Deepgram already reports ISO-639-1 codes, so no
 // name→code mapping is needed. When a locked language is passed it is sent as a
 // hint; otherwise detect_language=true lets Deepgram pick and report one.
+// Optional repeated `keyterm` params (domain terms) are forwarded to bias
+// recognition (nova-3 keyterm prompting).
 
 import { errorJson, json, preflight } from "../_shared/cors.ts";
 
@@ -38,11 +40,17 @@ Deno.serve(async (req: Request) => {
   const audio = new Uint8Array(await req.arrayBuffer());
   if (audio.length < 100) return errorJson("Empty audio", 400);
 
-  const language = new URL(req.url).searchParams.get("language") ?? "";
+  const reqUrl = new URL(req.url);
+  const language = reqUrl.searchParams.get("language") ?? "";
 
   const params = new URLSearchParams({ model: MODEL, smart_format: "true" });
   if (language) params.set("language", language);
   else params.set("detect_language", "true");
+  // Keyterm prompting (nova-3): repeated `keyterm` params, forwarded as-is.
+  for (const term of reqUrl.searchParams.getAll("keyterm")) {
+    const trimmed = term.trim();
+    if (trimmed) params.append("keyterm", trimmed);
+  }
 
   let res: Response;
   try {

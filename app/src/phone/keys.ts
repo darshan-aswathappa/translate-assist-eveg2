@@ -5,9 +5,30 @@
 
 import { STORAGE_KEYS } from "../config";
 
+// Deepgram caps keyterm prompting at 500 tokens (~100 words); 50 short terms
+// stays well inside that and keeps the connect URL a sane length.
+const MAX_KEYTERMS = 50;
+
 export interface UserKeys {
   deepgramKey: string;
   anthropicKey: string;
+}
+
+/** Parse the free-text keyterms field (one per line, or comma-separated) into a
+ * clean, de-duplicated, capped list. */
+export function parseKeyterms(raw: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[\n,]/)) {
+    const term = part.trim();
+    if (!term) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(term);
+    if (out.length >= MAX_KEYTERMS) break;
+  }
+  return out;
 }
 
 // The two bridge methods we need — accepting a structural type keeps this
@@ -29,6 +50,12 @@ export function createKeyStore(bridge: KeyStorage) {
     async setKeys(keys: UserKeys): Promise<void> {
       await bridge.setLocalStorage(STORAGE_KEYS.deepgramKey, keys.deepgramKey.trim());
       await bridge.setLocalStorage(STORAGE_KEYS.anthropicKey, keys.anthropicKey.trim());
+    },
+    async getKeyterms(): Promise<string[]> {
+      return parseKeyterms(await bridge.getLocalStorage(STORAGE_KEYS.keyterms));
+    },
+    async setKeyterms(terms: readonly string[]): Promise<void> {
+      await bridge.setLocalStorage(STORAGE_KEYS.keyterms, parseKeyterms(terms.join("\n")).join("\n"));
     },
   };
 }
