@@ -8,7 +8,7 @@ import { OsEventTypeList } from "@evenrealities/even_hub_sdk";
 export type GlassesAction =
   | "prev" // swipe up — previous suggestion
   | "next" // swipe down — next suggestion
-  | "toggle-pause" // single tap
+  | "end-turn" // single tap — end the turn & translate, or resume listening
   | "exit-dialog" // double tap
   | "cleanup" // system/abnormal exit — stop mic, unsubscribe
   | null;
@@ -28,7 +28,7 @@ export function actionForEvent(event: HubEventShape): GlassesAction {
   }
   if (event.sysEvent) {
     const t = event.sysEvent.eventType ?? 0;
-    if (t === OsEventTypeList.CLICK_EVENT) return "toggle-pause";
+    if (t === OsEventTypeList.CLICK_EVENT) return "end-turn";
     if (t === OsEventTypeList.DOUBLE_CLICK_EVENT) return "exit-dialog";
     if (
       t === OsEventTypeList.SYSTEM_EXIT_EVENT ||

@@ -27,7 +27,7 @@ export function mountLive(root: HTMLElement): LiveView {
         <span data-status>STARTING</span>
         <span class="eh-hud-lang" data-lang style="display:none"></span>
       </div>
-      <div class="eh-hud-empty" data-empty>Turns will appear here as your partner speaks.</div>
+      <div class="eh-hud-empty" data-empty>Tap the ring when your partner finishes speaking to translate the turn.</div>
       <div class="eh-hud-caption" data-caption style="display:none"></div>
       <div class="eh-hud-translation" data-translation style="display:none"></div>
       <div class="eh-hud-sug" data-suggestion style="display:none"></div>
@@ -46,7 +46,7 @@ export function mountLive(root: HTMLElement): LiveView {
   const errorLine = root.querySelector("[data-error]") as HTMLElement;
   const turns = root.querySelector("[data-turns]") as HTMLElement;
 
-  const ACTIVE = new Set(["LISTENING", "TRANSCRIBING", "THINKING"]);
+  const ACTIVE = new Set(["LISTENING", "TRANSCRIBING", "TRANSLATING", "THINKING"]);
 
   function setHud(statusText: string): void {
     status.textContent = statusText;

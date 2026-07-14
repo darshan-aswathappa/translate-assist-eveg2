@@ -2,17 +2,22 @@
 //
 // Pipeline (streaming, the default): glasses mic → energy-VAD speech gate →
 // Deepgram live WebSocket (interim captions on the HUD as the partner speaks)
-// → finalized segments → edge fn `respond` (Claude translation first, then 3
-// suggested replies as a follow-up) → HUD. If the WebSocket can't connect or
-// keeps dropping, the app falls back to the batch path: VAD utterance
-// segmentation → WAV → edge fn `transcribe` (Deepgram pre-recorded REST).
+// → finalized segments buffered into the current turn. Turns are ring-
+// controlled: a single tap ends the turn — the whole buffer goes to edge fn
+// `respond` as ONE utterance (Claude translation first, then 3 suggested
+// replies as a follow-up) → HUD — and a second tap resumes listening for the
+// next dialog. Nothing is translated until the wearer taps, so however
+// Deepgram fragments the speech, a turn is always the complete statement.
+// If the WebSocket can't connect or keeps dropping, the app falls back to the
+// batch path: VAD utterance segmentation → WAV → edge fn `transcribe`
+// (Deepgram pre-recorded REST) → the same turn buffer.
 //
 // The speaker's language locks after the first non-English detection (for the
 // UI badge and Claude's source-language hint); the transcription model itself
 // stays multilingual for the languages nova-3 covers so code-switching keeps
 // working, and only pins a monolingual model for languages outside that set —
-// see modelLanguageFor. Swipe cycles translation pages + replies, tap pauses
-// the mic, double-tap exits.
+// see modelLanguageFor. Swipe cycles translation pages + replies, tap ends the
+// turn / resumes listening, double-tap exits.
 // The phone shows Live/Sessions/Settings.
 
 import { waitForEvenAppBridge } from "@evenrealities/even_hub_sdk";
@@ -46,6 +51,7 @@ import {
   type Conversation,
   type Suggestion,
 } from "./conversation/thread";
+import { createTurnBuffer } from "./conversation/turnBuffer";
 import { clampIndex, hudText, paneCount } from "./glasses/layout";
 import { actionForEvent } from "./glasses/input";
 import { createPage, initRender, updateHud } from "./glasses/render";
@@ -53,12 +59,9 @@ import { createKeyStore, type UserKeys } from "./phone/keys";
 import { mountPhoneUi, type PhoneUi } from "./phone/ui";
 import { runDevFixtures } from "./devFixtures";
 
-// Segments shorter than this are held and coalesced with the next one so
-// Claude isn't asked to translate lone interjections mid-monologue.
-const MIN_SEGMENT_CHARS = 10;
-// How long after the speech gate closes to give Deepgram's Finalize response
-// before a held short segment is translated on its own.
-const SEGMENT_FLUSH_DELAY_MS = 1_000;
+// How long after the end-turn tap to give Deepgram's Finalize response before
+// the buffered turn is translated (the tail of speech is still in flight).
+const TURN_FINALIZE_GRACE_MS = 800;
 // Streaming failures before giving up and switching to the batch path.
 const MAX_WS_FAILURES = 3;
 
@@ -81,7 +84,10 @@ let keys: UserKeys = { deepgramKey: "", anthropicKey: "" };
 // paths. Applied at connect time, so an in-session edit takes effect on the next
 // streaming reconnect (or immediately on the batch path).
 let keyterms: string[] = [];
-let paused = false;
+// Ring-controlled turn cycle: listening (mic on, segments buffer) → tap →
+// translating (mic off, buffer sent as one turn) → hold (result on HUD) →
+// tap → listening.
+let phase: "listening" | "translating" | "hold" = "listening";
 let pipelineStarted = false;
 let mode: "streaming" | "batch" = "streaming";
 
@@ -105,9 +111,8 @@ let translating: Promise<void> = Promise.resolve();
 // a newer turn on the HUD.
 let turnSeq = 0;
 
-// A short segment held back for coalescing with the next one.
-let pendingSegment: LiveSegment | null = null;
-let pendingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+// Everything transcribed since the last end-turn tap; flushed as one turn.
+const turnBuffer = createTurnBuffer();
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
@@ -155,7 +160,8 @@ const ui: PhoneUi = mountPhoneUi(document.getElementById("app") as HTMLElement, 
     shownSuggestions = [];
     shownIndex = 0;
     turnSeq++;
-    pendingSegment = null;
+    turnBuffer.clear();
+    phase = "listening";
     ui.live.reset();
     ui.live.setLanguage(null);
     if (pipelineStarted) showStatus("LISTENING");
@@ -173,73 +179,74 @@ function describeError(err: unknown): string {
   return String(err);
 }
 
-function showPipelineError(err: unknown): void {
+function showPipelineError(err: unknown, label = "ERROR — STILL LISTENING"): void {
   console.error("pipeline error:", err);
-  const label =
-    err instanceof ApiError && err.status === 401
-      ? "CHECK API KEYS ON PHONE"
-      : "ERROR — STILL LISTENING";
+  if (err instanceof ApiError && err.status === 401) label = "CHECK API KEYS ON PHONE";
   showStatus(label);
   ui.live.setError(describeError(err));
 }
 
-// ─── Translation queue ───────────────────────────────────────────────────────
+// ─── Turn control ────────────────────────────────────────────────────────────
 
 function handleSegment(seg: LiveSegment): void {
   if (!conversation.threadId) return;
-  if (pendingFlushTimer !== null) {
-    clearTimeout(pendingFlushTimer);
-    pendingFlushTimer = null;
-  }
 
   // Before the language locks, English is assumed to be the wearer's own
   // voice bleeding into the mic — ignore it rather than locking onto it.
   if (!conversation.lockedLanguage && seg.language === "en") {
-    ui.live.setCaption(null);
-    if (shownTranslation) showResult();
-    else showStatus("LISTENING");
+    if (phase === "listening") {
+      ui.live.setCaption(null);
+      if (shownTranslation) showResult();
+      else showStatus("LISTENING");
+    }
     return;
   }
   conversation = withDetectedLanguage(conversation, seg.language);
   ui.live.setLanguage(conversation.lockedLanguage);
 
-  if (pendingSegment) {
-    seg = {
-      text: `${pendingSegment.text} ${seg.text}`.trim(),
-      language: pendingSegment.language || seg.language,
-    };
-    pendingSegment = null;
+  // While the partner speaks the buffer just grows on the caption; translation
+  // waits for the end-turn tap.
+  turnBuffer.append(seg);
+  if (phase === "listening") showCaption(turnBuffer.text());
+}
+
+// Tap while listening: the capture callback stops feeding the mic (it checks
+// the phase), the in-flight tail is pulled out of the transcriber, then the
+// whole buffer is translated as one turn.
+function endTurn(): void {
+  phase = "translating";
+  showStatus("TRANSLATING");
+  if (mode === "streaming") {
+    live?.finalize();
+    setTimeout(finishTurn, TURN_FINALIZE_GRACE_MS);
+  } else {
+    // flush() hands any pending utterance to the transcription queue
+    // synchronously, so chaining after it runs once that text is buffered.
+    segmenter?.flush();
+    transcribing = transcribing.then(finishTurn);
   }
-  // Very short segments read as choppy one-word turns — hold them briefly so
-  // they merge with the continuation.
-  if (seg.text.length < MIN_SEGMENT_CHARS) {
-    pendingSegment = seg;
-    scheduleSegmentFlush();
+}
+
+function finishTurn(): void {
+  if (phase !== "translating") return; // session reset while waiting
+  if (turnBuffer.isEmpty()) {
+    resumeListening(); // tapped with nothing heard — just keep listening
     return;
   }
-
-  showCaption(seg.text);
-  enqueueTranslation(seg);
-}
-
-function scheduleSegmentFlush(): void {
-  if (pendingFlushTimer !== null) clearTimeout(pendingFlushTimer);
-  pendingFlushTimer = setTimeout(() => {
-    pendingFlushTimer = null;
-    flushPendingSegment();
-  }, SEGMENT_FLUSH_DELAY_MS);
-}
-
-function flushPendingSegment(): void {
-  if (!pendingSegment) return;
-  const seg = pendingSegment;
-  pendingSegment = null;
-  showCaption(seg.text);
-  enqueueTranslation(seg);
-}
-
-function enqueueTranslation(seg: LiveSegment): void {
+  const seg: LiveSegment = { text: turnBuffer.text(), language: turnBuffer.language() };
   translating = translating.then(() => translateSegment(seg));
+}
+
+function resumeListening(): void {
+  phase = "listening";
+  if (shownTranslation) {
+    // Keep the last translation on the HUD so the wearer can still read it
+    // aloud; only the status line reflects the resumed mic.
+    showResult();
+    ui.live.setStatus("LISTENING");
+  } else {
+    showStatus("LISTENING");
+  }
 }
 
 async function translateSegment(seg: LiveSegment): Promise<void> {
@@ -264,16 +271,22 @@ async function translateSegment(seg: LiveSegment): Promise<void> {
       translation: r.translation_en,
       suggestions: [],
     });
+    turnBuffer.clear();
     if (seq === turnSeq) {
       shownTranslation = r.translation_en;
       shownSuggestions = [];
       shownIndex = 0;
+      phase = "hold";
       showResult();
-      ui.live.setStatus("LISTENING");
+      ui.live.setStatus("TAP TO RESUME");
     }
     void fetchSuggestions(seq, seg.text, r.translation_en, language, context, r.utterance_id);
   } catch (err) {
-    showPipelineError(err);
+    // The buffer is kept so a resume + re-tap retries the same turn.
+    if (seq === turnSeq) {
+      phase = "hold";
+      showPipelineError(err, "ERROR — TAP TO RETRY");
+    }
   }
 }
 
@@ -316,7 +329,7 @@ async function transcribeUtterance(pcm: Uint8Array): Promise<void> {
   if (!conversation.threadId) return;
   try {
     ui.live.setError(null);
-    showStatus("TRANSCRIBING");
+    if (phase === "listening") showStatus("TRANSCRIBING");
     const wav = pcmToWav(pcm);
     const t = await api.transcribe(wav, {
       deepgramKey: keys.deepgramKey,
@@ -324,10 +337,11 @@ async function transcribeUtterance(pcm: Uint8Array): Promise<void> {
       keyterms,
     });
     if (!t.text) {
-      showStatus("LISTENING");
+      if (phase === "listening") showStatus("LISTENING");
       return;
     }
     handleSegment({ text: t.text, language: t.language });
+    if (phase === "listening") showStatus("LISTENING");
   } catch (err) {
     showPipelineError(err);
   }
@@ -345,7 +359,7 @@ function switchToBatch(): void {
   live?.close();
   live = null;
   segmenter = createUtteranceSegmenter({ onUtterance });
-  if (pipelineStarted && !paused) showStatus("LISTENING");
+  if (pipelineStarted && phase === "listening") showStatus("LISTENING");
 }
 
 // ─── Streaming transcription path ────────────────────────────────────────────
@@ -356,7 +370,9 @@ async function startStreaming(): Promise<void> {
     language: modelLanguageFor(conversation.lockedLanguage),
     keyterms,
     onInterim: (text) => {
-      if (!paused) showCaption(text);
+      // The assembler's interim covers the current utterance only — prefix
+      // what's already buffered so the whole turn stays visible.
+      if (phase === "listening") showCaption(`${turnBuffer.text()} ${text}`.trim());
     },
     onSegment: (seg) => {
       wsFailures = 0;
@@ -372,10 +388,9 @@ async function startStreaming(): Promise<void> {
     gate = createSpeechGate({
       onAudio: (frame) => live?.sendPcm(frame),
       onGateClose: () => {
-        // Flush anything Deepgram is still buffering, then translate a held
-        // short segment if no continuation follows.
+        // Flush anything Deepgram is still buffering into the turn buffer so
+        // the tail isn't stuck when the end-turn tap comes later.
         live?.finalize();
-        scheduleSegmentFlush();
       },
     });
   }
@@ -413,7 +428,7 @@ async function startPipeline(): Promise<void> {
       segmenter = createUtteranceSegmenter({ onUtterance });
     }
     capture = await startCapture(bridge, (frame) => {
-      if (paused) return;
+      if (phase !== "listening") return;
       if (mode === "streaming") gate?.push(frame);
       else segmenter?.push(frame);
     });
@@ -450,19 +465,10 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
       showResult();
       break;
     }
-    case "toggle-pause":
-      paused = !paused;
-      if (paused) {
-        segmenter?.flush();
-        live?.finalize();
-        scheduleSegmentFlush();
-        showStatus("PAUSED — TAP TO RESUME");
-      } else if (shownTranslation) {
-        showResult();
-        ui.live.setStatus("LISTENING");
-      } else {
-        showStatus("LISTENING");
-      }
+    case "end-turn":
+      // Taps are ignored while a turn is being translated.
+      if (phase === "listening" && pipelineStarted) endTurn();
+      else if (phase === "hold") resumeListening();
       break;
     case "exit-dialog":
       // Don't tear down yet — the user can cancel the system dialog. Cleanup

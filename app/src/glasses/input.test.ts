@@ -7,9 +7,9 @@ describe("actionForEvent", () => {
     expect(actionForEvent({ textEvent: { eventType: 2 } })).toBe("next");
   });
 
-  it("maps single click (protobuf-omitted zero) to pause toggle", () => {
-    expect(actionForEvent({ sysEvent: {} })).toBe("toggle-pause");
-    expect(actionForEvent({ sysEvent: { eventType: 0 } })).toBe("toggle-pause");
+  it("maps single click (protobuf-omitted zero) to end-turn", () => {
+    expect(actionForEvent({ sysEvent: {} })).toBe("end-turn");
+    expect(actionForEvent({ sysEvent: { eventType: 0 } })).toBe("end-turn");
   });
 
   it("maps double click to the exit dialog", () => {
