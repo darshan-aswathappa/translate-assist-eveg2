@@ -28,6 +28,9 @@ export type HudView =
       translation: string;
       suggestions: readonly Suggestion[];
       index: number;
+      /** Optional state line shown above the translation (e.g. paused), so the
+       * wearer sees the mic is off without looking at the phone. */
+      banner?: string;
     };
 
 const MAX_TOTAL = 1000;
@@ -86,13 +89,21 @@ export function hudText(view: HudView): string {
   const total = extraPages + Math.max(view.suggestions.length, 1);
   const idx = clampIndex(view.index, total);
 
+  // A state banner (e.g. paused) rides above the translation on every pane.
+  const banner = view.banner ? [view.banner, ""] : [];
+
   // Leading translation pages: page text only, with a page counter.
   if (idx < extraPages) {
     const cont = idx > 0 ? "…" : "";
     return clamp(
-      [`"${cont}${pages[idx]}…"`, "", `[page ${idx + 1}/${pages.length}]`, "", "<swipe for more>"].join(
-        "\n",
-      ),
+      [
+        ...banner,
+        `"${cont}${pages[idx]}…"`,
+        "",
+        `[page ${idx + 1}/${pages.length}]`,
+        "",
+        "<swipe for more>",
+      ].join("\n"),
       MAX_TOTAL,
     );
   }
@@ -103,7 +114,7 @@ export function hudText(view: HudView): string {
   const pageText = pages[pages.length - 1];
   const shown = extraPages > 0 ? `…${pageText}` : pageText;
 
-  const lines: string[] = [`"${clamp(shown, MAX_TRANSLATION + 1)}"`, ""];
+  const lines: string[] = [...banner, `"${clamp(shown, MAX_TRANSLATION + 1)}"`, ""];
   if (extraPages > 0) {
     lines.push(`[page ${pages.length}/${pages.length}]`);
   }

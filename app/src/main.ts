@@ -134,6 +134,8 @@ function showResult(): void {
       translation: shownTranslation,
       suggestions: shownSuggestions,
       index: shownIndex,
+      // In hold the mic is off — surface that on the HUD, not just the phone.
+      banner: phase === "hold" ? "⏸ PAUSED · TAP TO RESUME" : undefined,
     }),
   );
 }

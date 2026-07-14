@@ -34,6 +34,27 @@ describe("hudText", () => {
     expect(text).toContain("<swipe for more>");
   });
 
+  it("shows a state banner above the translation when paused", () => {
+    const text = hudText({ ...RESULT, banner: "⏸ PAUSED · TAP TO RESUME" });
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("⏸ PAUSED · TAP TO RESUME");
+    expect(text).toContain('"Do you speak English?"');
+    // Banner also rides on leading translation pages.
+    const LONG = Array.from({ length: 80 }, (_, i) => `word${i}`).join(" ");
+    const paged = hudText({
+      kind: "result",
+      translation: LONG,
+      suggestions: RESULT.suggestions,
+      index: 0,
+      banner: "⏸ PAUSED · TAP TO RESUME",
+    });
+    expect(paged.split("\n")[0]).toBe("⏸ PAUSED · TAP TO RESUME");
+  });
+
+  it("omits the banner line when none is set", () => {
+    expect(hudText(RESULT).split("\n")[0]).toBe('"Do you speak English?"');
+  });
+
   it("omits empty roman/gloss lines (Latin-script languages)", () => {
     const text = hudText({
       kind: "result",
