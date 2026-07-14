@@ -3,7 +3,7 @@
 ## What it does
 
 Worn G2 glasses listen to a conversation partner speaking a foreign language.
-Each utterance is transcribed (Whisper on Groq), translated to English, and
+Each utterance is transcribed (Deepgram nova-3), translated to English, and
 answered with 3 suggested replies in the speaker's language (native script +
 romanization + English gloss), shown on the glasses HUD:
 
@@ -28,10 +28,10 @@ Sumimasen, amari tokui dewa arimasen.
 ```
 G2 glasses ──BLE──► Even app WebView (this app, on phone)
    mic PCM 16k s16le     │ energy-VAD segments utterances → WAV
-                         │ user keys sent per-request (x-groq-key / x-anthropic-key)
+                         │ user keys sent per-request (x-deepgram-key / x-anthropic-key)
                          ▼
              Supabase Edge Functions (pass-through proxies, CORS ours)
-               ├─ transcribe → Groq whisper-large-v3-turbo
+               ├─ transcribe → Deepgram nova-3
                ├─ respond   → Claude Sonnet: translation + 3 replies
                └─ threads   → create / list / fetch / delete
                          ▼

@@ -1,13 +1,16 @@
-// Energy-based utterance segmentation for the Whisper pipeline. Whisper is a
-// chunk (REST) API, not a streaming one, so the app must decide where an
-// utterance ends. PCM frames (s16le 16 kHz mono, from audio/capture) are
-// bucketed into fixed 20 ms analysis windows; a simple RMS gate with hysteresis
-// marks speech, and an utterance is emitted after `silenceMs` of trailing quiet
-// (or when `maxUtteranceMs` is reached mid-speech).
+// Energy-based voice activity detection. PCM frames (s16le 16 kHz mono, from
+// audio/capture) are bucketed into fixed 20 ms analysis windows and gated on
+// RMS. Two consumers:
 //
-// The segmenter buffers raw bytes and emits a single concatenated Uint8Array
-// per utterance, including `prerollMs` of audio from just before speech onset
-// so soft first syllables aren't clipped.
+//   createUtteranceSegmenter — buffers whole utterances for the batch
+//   (pre-recorded REST) transcription path. An utterance ends after `silenceMs`
+//   of trailing quiet; long monologues split early at natural pauses (after
+//   `softSplitAfterMs` of speech a much shorter `softSilenceMs` pause is
+//   enough) so speech is never cut mid-word by the `maxUtteranceMs` cap.
+//
+//   createSpeechGate — a transmit gate for the live streaming path: forwards
+//   audio (with pre-roll) only while in/near speech, so silence isn't streamed,
+//   and reports when the gate closes so the caller can finalize/keepalive.
 
 export interface SegmenterOptions {
   onUtterance: (pcm: Uint8Array) => void;
@@ -17,8 +20,13 @@ export interface SegmenterOptions {
   silenceMs?: number;
   /** Speech shorter than this is discarded as a blip. */
   minSpeechMs?: number;
-  /** Force-emit if continuous speech exceeds this. */
+  /** Force-emit if continuous speech exceeds this (hard safety cap). */
   maxUtteranceMs?: number;
+  /** After this much continuous speech, `softSilenceMs` of quiet is enough to
+   * split — long monologues break at breaths instead of the hard cap. */
+  softSplitAfterMs?: number;
+  /** Shorter pause that ends an utterance once past `softSplitAfterMs`. */
+  softSilenceMs?: number;
   /** Audio kept from before speech onset. */
   prerollMs?: number;
 }
@@ -58,15 +66,36 @@ function concat(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
+// Shared re-bucketing: feed arbitrary-length frames, receive fixed 20 ms
+// windows. Windows are copied so a reused capture buffer can't mutate them.
+function createWindower(handleWindow: (win: Uint8Array) => void) {
+  let pending = new Uint8Array(0);
+  return (frame: Uint8Array): void => {
+    if (frame.length === 0) return;
+    let buf: Uint8Array;
+    if (pending.length > 0) {
+      buf = concat([pending, frame]);
+      pending = new Uint8Array(0);
+    } else {
+      buf = frame;
+    }
+    let off = 0;
+    while (buf.length - off >= WINDOW_BYTES) {
+      handleWindow(buf.slice(off, off + WINDOW_BYTES));
+      off += WINDOW_BYTES;
+    }
+    if (off < buf.length) pending = buf.slice(off);
+  };
+}
+
 export function createUtteranceSegmenter(opts: SegmenterOptions): UtteranceSegmenter {
   const threshold = opts.threshold ?? 500;
   const silenceMs = opts.silenceMs ?? 700;
   const minSpeechMs = opts.minSpeechMs ?? 250;
-  const maxUtteranceMs = opts.maxUtteranceMs ?? 15_000;
+  const maxUtteranceMs = opts.maxUtteranceMs ?? 30_000;
+  const softSplitAfterMs = opts.softSplitAfterMs ?? 8_000;
+  const softSilenceMs = opts.softSilenceMs ?? 300;
   const prerollMs = opts.prerollMs ?? 300;
-
-  // Re-bucketing buffer: bytes not yet forming a full analysis window.
-  let pending = new Uint8Array(0);
 
   // Ring of recent quiet windows kept for pre-roll.
   const preroll: Uint8Array[] = [];
@@ -117,29 +146,84 @@ export function createUtteranceSegmenter(opts: SegmenterOptions): UtteranceSegme
     if (loud) loudMs += WINDOW_MS;
     quietMs = loud ? 0 : quietMs + WINDOW_MS;
 
-    if (quietMs >= silenceMs || speechMs >= maxUtteranceMs) emit();
+    // Once a monologue runs long, split at the next natural pause instead of
+    // waiting for the full silence window (or worse, the hard cap mid-word).
+    const effectiveSilence = speechMs >= softSplitAfterMs ? softSilenceMs : silenceMs;
+    if (quietMs >= effectiveSilence || speechMs >= maxUtteranceMs) emit();
   }
 
+  const push = createWindower(handleWindow);
+
   return {
-    push(frame) {
-      if (frame.length === 0) return;
-      let buf: Uint8Array;
-      if (pending.length > 0) {
-        buf = concat([pending, frame]);
-        pending = new Uint8Array(0);
-      } else {
-        buf = frame;
-      }
-      let off = 0;
-      while (buf.length - off >= WINDOW_BYTES) {
-        // Copy so a reused capture buffer can't mutate emitted audio.
-        handleWindow(buf.slice(off, off + WINDOW_BYTES));
-        off += WINDOW_BYTES;
-      }
-      if (off < buf.length) pending = buf.slice(off);
-    },
+    push,
     flush() {
       if (inSpeech) emit();
     },
   };
+}
+
+// ─── Speech gate (streaming transmit gate) ───────────────────────────────────
+
+export interface SpeechGateOptions {
+  /** Receives audio to transmit: pre-roll + speech + hangover silence. */
+  onAudio: (frame: Uint8Array) => void;
+  /** The hangover elapsed after speech — the caller can finalize the stream. */
+  onGateClose?: () => void;
+  /** RMS threshold (s16 sample units) above which a window counts as speech. */
+  threshold?: number;
+  /** Silence transmitted after speech before the gate closes. Must comfortably
+   * exceed the streaming endpointer's silence window so end-of-utterance is
+   * detected from real audio before we stop sending. */
+  hangoverMs?: number;
+  /** Audio kept from before speech onset. */
+  prerollMs?: number;
+}
+
+export interface SpeechGate {
+  /** Feed a PCM frame (any length); windows are re-bucketed internally. */
+  push: (frame: Uint8Array) => void;
+  /** Whether the gate is currently transmitting. */
+  isOpen: () => boolean;
+}
+
+export function createSpeechGate(opts: SpeechGateOptions): SpeechGate {
+  const threshold = opts.threshold ?? 500;
+  const hangoverMs = opts.hangoverMs ?? 1_200;
+  const prerollMs = opts.prerollMs ?? 300;
+
+  const preroll: Uint8Array[] = [];
+  const prerollWindows = Math.ceil(prerollMs / WINDOW_MS);
+
+  let open = false;
+  let quietMs = 0;
+
+  function handleWindow(win: Uint8Array): void {
+    const loud = frameRms(win) >= threshold;
+
+    if (!open) {
+      if (loud) {
+        open = true;
+        quietMs = 0;
+        for (const p of preroll) opts.onAudio(p);
+        preroll.length = 0;
+        opts.onAudio(win);
+      } else {
+        preroll.push(win);
+        if (preroll.length > prerollWindows) preroll.shift();
+      }
+      return;
+    }
+
+    opts.onAudio(win);
+    quietMs = loud ? 0 : quietMs + WINDOW_MS;
+    if (quietMs >= hangoverMs) {
+      open = false;
+      quietMs = 0;
+      opts.onGateClose?.();
+    }
+  }
+
+  const push = createWindower(handleWindow);
+
+  return { push, isOpen: () => open };
 }

@@ -1,11 +1,11 @@
 // Shared CORS + JSON helpers. The G2 app runs in the Even WebView where full
 // browser CORS applies, so every function must answer preflights and echo
-// permissive headers. The user's API keys travel in x-groq-key/x-anthropic-key.
+// permissive headers. The user's API keys travel in x-deepgram-key/x-anthropic-key.
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-groq-key, x-anthropic-key",
+    "authorization, x-client-info, apikey, content-type, x-deepgram-key, x-anthropic-key",
   "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
 } as const;
 

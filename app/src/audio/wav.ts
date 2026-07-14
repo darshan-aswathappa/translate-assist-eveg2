@@ -1,5 +1,5 @@
 // Wrap raw PCM (s16le, 16 kHz, mono — the G2 mic format) in a WAV container so
-// it can be posted to Whisper as a normal audio file.
+// it can be posted to the transcription API as a normal audio file.
 
 const SAMPLE_RATE = 16_000;
 const CHANNELS = 1;

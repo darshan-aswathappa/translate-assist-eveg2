@@ -1,10 +1,12 @@
-// Settings view: enter + save the Groq and Anthropic API keys. Keys persist in
-// the Even app's storage (bridge.setLocalStorage) and are shown masked once
-// saved. No login — the keys are the only credentials this app has.
+// Settings view: enter + save the Deepgram and Anthropic API keys. Keys persist
+// in the Even app's storage (bridge.setLocalStorage) and are shown masked once
+// saved. No login — the keys are the only credentials this app has. Styled as
+// an Even Hub card form with an accent save button.
 
 import { createApiClient } from "../api/client";
+import { pcmToWav } from "../audio/wav";
 import { FUNCTIONS_BASE } from "../config";
-import { maskKey, type KeyStore, type UserKeys } from "./keys";
+import { isValidDeepgramKey, maskKey, type KeyStore, type UserKeys } from "./keys";
 
 export interface SettingsDeps {
   keyStore: KeyStore;
@@ -13,28 +15,36 @@ export interface SettingsDeps {
 
 export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
   root.innerHTML = `
-    <div class="ta-field">
-      <label>Groq API key (Whisper transcription)</label>
-      <input type="password" data-key="groq" placeholder="gsk_…" autocomplete="off" />
-      <div class="ta-hint" data-hint="groq"></div>
+    <div class="eh-section-label" style="margin-top:0">API keys</div>
+    <div class="eh-card">
+      <div class="eh-field">
+        <label class="eh-label">Deepgram API key — transcription</label>
+        <input class="eh-input" type="password" data-key="deepgram" placeholder="Deepgram API key" autocomplete="off" />
+        <div class="eh-hint" data-hint="deepgram"></div>
+      </div>
+      <div class="eh-field">
+        <label class="eh-label">Anthropic API key — translation + replies</label>
+        <input class="eh-input" type="password" data-key="anthropic" placeholder="sk-ant-…" autocomplete="off" />
+        <div class="eh-hint" data-hint="anthropic"></div>
+      </div>
+      <button class="eh-btn accent" data-action="save" style="width:100%">Save keys</button>
+      <div class="eh-msg" data-msg></div>
     </div>
-    <div class="ta-field">
-      <label>Anthropic API key (translation + replies)</label>
-      <input type="password" data-key="anthropic" placeholder="sk-ant-…" autocomplete="off" />
-      <div class="ta-hint" data-hint="anthropic"></div>
-    </div>
-    <button class="ta-btn" data-action="save">Save keys</button>
-    <div class="ta-msg" data-msg></div>`;
+    <div class="eh-hint" style="padding:0 4px">
+      Keys are stored only on this phone via the Even app's secure storage and
+      sent per-request to the Translate Assist backend. They never leave the
+      device otherwise.
+    </div>`;
 
-  const groqInput = root.querySelector('[data-key="groq"]') as HTMLInputElement;
+  const deepgramInput = root.querySelector('[data-key="deepgram"]') as HTMLInputElement;
   const anthropicInput = root.querySelector('[data-key="anthropic"]') as HTMLInputElement;
-  const groqHint = root.querySelector('[data-hint="groq"]') as HTMLElement;
+  const deepgramHint = root.querySelector('[data-hint="deepgram"]') as HTMLElement;
   const anthropicHint = root.querySelector('[data-hint="anthropic"]') as HTMLElement;
   const saveBtn = root.querySelector('[data-action="save"]') as HTMLButtonElement;
   const msg = root.querySelector("[data-msg]") as HTMLElement;
 
   function showSaved(keys: UserKeys): void {
-    groqHint.textContent = keys.groqKey ? `Saved: ${maskKey(keys.groqKey)}` : "Not set";
+    deepgramHint.textContent = keys.deepgramKey ? `Saved: ${maskKey(keys.deepgramKey)}` : "Not set";
     anthropicHint.textContent = keys.anthropicKey
       ? `Saved: ${maskKey(keys.anthropicKey)}`
       : "Not set";
@@ -44,14 +54,14 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
 
   saveBtn.addEventListener("click", () => {
     void (async () => {
-      msg.classList.remove("err");
+      msg.classList.remove("err", "ok");
       const existing = await deps.keyStore.getKeys();
       // Empty input = keep the currently saved key; typed input replaces it.
       const keys: UserKeys = {
-        groqKey: groqInput.value.trim() || existing.groqKey,
+        deepgramKey: deepgramInput.value.trim() || existing.deepgramKey,
         anthropicKey: anthropicInput.value.trim() || existing.anthropicKey,
       };
-      if (!keys.groqKey || !keys.anthropicKey) {
+      if (!keys.deepgramKey || !keys.anthropicKey) {
         msg.classList.add("err");
         msg.textContent = "Both keys are required.";
         return;
@@ -61,9 +71,10 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
       try {
         await verifyKeys(keys);
         await deps.keyStore.setKeys(keys);
-        groqInput.value = "";
+        deepgramInput.value = "";
         anthropicInput.value = "";
         showSaved(keys);
+        msg.classList.add("ok");
         msg.textContent = "Keys verified and saved.";
         deps.onKeysSaved(keys);
       } catch (err) {
@@ -76,16 +87,22 @@ export function mountSettings(root: HTMLElement, deps: SettingsDeps): void {
   });
 }
 
-// Lightweight liveness check: a tiny respond call exercises the Anthropic key;
-// transcribe is checked implicitly on first use (a fake WAV would waste a call).
+// Liveness checks: exercise both keys against their providers now, so a bad or
+// unfunded key surfaces here instead of as a generic "ERROR" mid-conversation.
 async function verifyKeys(keys: UserKeys): Promise<void> {
-  if (!keys.groqKey.startsWith("gsk_")) {
-    throw new Error("Groq keys start with gsk_ — double-check the Groq key.");
+  if (!isValidDeepgramKey(keys.deepgramKey)) {
+    throw new Error("Deepgram keys are 40-character hex strings — double-check the Deepgram key.");
   }
   if (!keys.anthropicKey.startsWith("sk-ant-")) {
     throw new Error("Anthropic keys start with sk-ant- — double-check the Anthropic key.");
   }
   const api = createApiClient({ baseUrl: FUNCTIONS_BASE, timeoutMs: 15_000 });
+
+  // Deepgram: ~200 ms of silence is enough to authenticate the key (an empty
+  // transcript is expected). Catches 401 (bad key) / quota errors up front.
+  const silence = pcmToWav(new Uint8Array(6_400));
+  await api.transcribe(silence, { deepgramKey: keys.deepgramKey });
+
   const thread = await api.createThread();
   try {
     await api.respond({

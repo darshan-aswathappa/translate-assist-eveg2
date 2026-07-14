@@ -6,7 +6,7 @@
 import { STORAGE_KEYS } from "../config";
 
 export interface UserKeys {
-  groqKey: string;
+  deepgramKey: string;
   anthropicKey: string;
 }
 
@@ -20,20 +20,25 @@ export interface KeyStorage {
 export function createKeyStore(bridge: KeyStorage) {
   return {
     async getKeys(): Promise<UserKeys> {
-      const [groqKey, anthropicKey] = await Promise.all([
-        bridge.getLocalStorage(STORAGE_KEYS.groqKey),
+      const [deepgramKey, anthropicKey] = await Promise.all([
+        bridge.getLocalStorage(STORAGE_KEYS.deepgramKey),
         bridge.getLocalStorage(STORAGE_KEYS.anthropicKey),
       ]);
-      return { groqKey, anthropicKey };
+      return { deepgramKey, anthropicKey };
     },
     async setKeys(keys: UserKeys): Promise<void> {
-      await bridge.setLocalStorage(STORAGE_KEYS.groqKey, keys.groqKey.trim());
+      await bridge.setLocalStorage(STORAGE_KEYS.deepgramKey, keys.deepgramKey.trim());
       await bridge.setLocalStorage(STORAGE_KEYS.anthropicKey, keys.anthropicKey.trim());
     },
   };
 }
 
 export type KeyStore = ReturnType<typeof createKeyStore>;
+
+/** Deepgram API keys are 40-character hex strings (no vendor prefix). */
+export function isValidDeepgramKey(key: string): boolean {
+  return /^[a-f0-9]{40}$/i.test(key.trim());
+}
 
 /** Display form of a stored key: first 4 + last 4 chars, middle masked. */
 export function maskKey(key: string): string {

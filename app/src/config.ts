@@ -1,6 +1,6 @@
 // Runtime configuration, sourced from Vite env vars (see .env.example).
 // The Supabase URL + publishable key identify our backend project; the user's
-// Groq / Anthropic API keys are NOT here — they are entered in the phone
+// Deepgram / Anthropic API keys are NOT here — they are entered in the phone
 // Settings screen and persisted via bridge.setLocalStorage.
 
 const env = import.meta.env;
@@ -21,7 +21,7 @@ export const RESPOND_TIMEOUT_MS = 30_000;
 
 // bridge.setLocalStorage keys for user-entered settings.
 export const STORAGE_KEYS = {
-  groqKey: "ta.groq_key",
+  deepgramKey: "ta.deepgram_key",
   anthropicKey: "ta.anthropic_key",
   activeThreadId: "ta.active_thread",
 } as const;

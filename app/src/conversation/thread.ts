@@ -1,7 +1,7 @@
 // Immutable conversation state. One "turn" is: partner utterance (original) →
 // English translation → suggested replies in their language. The detected
 // language locks on first detection and stays fixed for the thread (it's sent
-// as a hint to Whisper on every later utterance).
+// as a hint to the transcription API on every later utterance).
 
 export interface Suggestion {
   native: string;

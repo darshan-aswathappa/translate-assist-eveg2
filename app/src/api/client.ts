@@ -1,7 +1,8 @@
 // Typed fetch wrappers for the three Supabase Edge Functions. The user's
-// Groq / Anthropic keys travel per-request in headers (x-groq-key /
+// Deepgram / Anthropic keys travel per-request in headers (x-deepgram-key /
 // x-anthropic-key) — the functions are pass-through proxies and never store
-// them. Every call has an abort timeout so a dead network can't hang the HUD.
+// them. Every call has an abort timeout so a dead network can't hang the HUD,
+// and transient failures (network drop, 5xx) are retried with backoff.
 
 import type { Suggestion } from "../conversation/thread";
 
@@ -20,9 +21,15 @@ export interface TranscribeResult {
   language: string;
 }
 
+/** What the wearer needs from a turn. `translate` mode returns an empty
+ * suggestions array plus the persisted utterance id, so a follow-up `suggest`
+ * call can attach suggestions to the same row. */
+export type RespondMode = "full" | "translate" | "suggest";
+
 export interface RespondResult {
   translation_en: string;
   suggestions: Suggestion[];
+  utterance_id?: string | null;
 }
 
 export interface ThreadSummary {
@@ -47,9 +54,28 @@ export interface ThreadDetail extends ThreadSummary {
 export interface ApiClientOptions {
   baseUrl: string;
   timeoutMs?: number;
+  /** Tighter timeout for transcription (a single short request); defaults to
+   * `timeoutMs` when not given. */
+  transcribeTimeoutMs?: number;
+  /** Extra attempts after the first for transient failures (network errors and
+   * 5xx). Respond retries can, at worst, persist a rare duplicate turn row —
+   * an accepted trade-off for not dropping utterances. */
+  retries?: number;
+  /** Base backoff between retries (grows linearly, with jitter). */
+  retryDelayMs?: number;
 }
 
-async function request<T>(
+function isRetryable(err: unknown): boolean {
+  if (err instanceof ApiError) return err.status >= 500;
+  // fetch network failure ("Failed to fetch" / "Load failed") — not an abort.
+  return err instanceof TypeError;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestOnce<T>(
   url: string,
   init: RequestInit,
   timeoutMs: number,
@@ -69,24 +95,51 @@ async function request<T>(
   }
 }
 
+async function request<T>(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  retries: number,
+  retryDelayMs: number,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await requestOnce<T>(url, init, timeoutMs);
+    } catch (err) {
+      if (attempt >= retries || !isRetryable(err)) throw err;
+      await sleep(retryDelayMs * (attempt + 1) + Math.random() * retryDelayMs);
+    }
+  }
+}
+
 export function createApiClient(opts: ApiClientOptions) {
   const base = opts.baseUrl.replace(/\/$/, "");
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  const transcribeTimeoutMs = opts.transcribeTimeoutMs ?? timeoutMs;
+  const retries = opts.retries ?? 0;
+  const retryDelayMs = opts.retryDelayMs ?? 400;
+
+  function call<T>(url: string, init: RequestInit, timeout = timeoutMs): Promise<T> {
+    return request<T>(url, init, timeout, retries, retryDelayMs);
+  }
 
   return {
     async transcribe(
       wav: Uint8Array,
-      { groqKey, language }: { groqKey: string; language?: string },
+      { deepgramKey, language }: { deepgramKey: string; language?: string },
     ): Promise<TranscribeResult> {
       const qs = language ? `?language=${encodeURIComponent(language)}` : "";
-      return request<TranscribeResult>(
+      return call<TranscribeResult>(
         `${base}/transcribe${qs}`,
         {
           method: "POST",
-          headers: { "content-type": "audio/wav", "x-groq-key": groqKey },
-          body: wav.slice().buffer as ArrayBuffer,
+          headers: { "content-type": "audio/wav", "x-deepgram-key": deepgramKey },
+          // A Blob (not a bare ArrayBuffer) — the iOS/WebKit WebView the glasses
+          // app runs in fails a fetch with an ArrayBuffer body ("Load failed",
+          // the POST never leaves the device), while a Blob uploads reliably.
+          body: new Blob([wav.slice()], { type: "audio/wav" }),
         },
-        timeoutMs,
+        transcribeTimeoutMs,
       );
     },
 
@@ -96,52 +149,44 @@ export function createApiClient(opts: ApiClientOptions) {
       text: string;
       language: string;
       context: readonly string[];
+      mode?: RespondMode;
+      utteranceId?: string;
     }): Promise<RespondResult> {
-      return request<RespondResult>(
-        `${base}/respond`,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-anthropic-key": params.anthropicKey,
-          },
-          body: JSON.stringify({
-            thread_id: params.threadId,
-            text: params.text,
-            language: params.language,
-            context: params.context,
-          }),
+      return call<RespondResult>(`${base}/respond`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-anthropic-key": params.anthropicKey,
         },
-        timeoutMs,
-      );
+        body: JSON.stringify({
+          thread_id: params.threadId,
+          text: params.text,
+          language: params.language,
+          context: params.context,
+          ...(params.mode ? { mode: params.mode } : {}),
+          ...(params.utteranceId ? { utterance_id: params.utteranceId } : {}),
+        }),
+      });
     },
 
     async createThread(): Promise<{ id: string }> {
-      return request(
-        `${base}/threads`,
-        { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
-        timeoutMs,
-      );
+      return call(`${base}/threads`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
     },
 
     async listThreads(): Promise<{ threads: ThreadSummary[] }> {
-      return request(`${base}/threads`, { method: "GET" }, timeoutMs);
+      return call(`${base}/threads`, { method: "GET" });
     },
 
     async getThread(id: string): Promise<ThreadDetail> {
-      return request(
-        `${base}/threads?id=${encodeURIComponent(id)}`,
-        { method: "GET" },
-        timeoutMs,
-      );
+      return call(`${base}/threads?id=${encodeURIComponent(id)}`, { method: "GET" });
     },
 
     async deleteThread(id: string): Promise<void> {
-      await request(
-        `${base}/threads?id=${encodeURIComponent(id)}`,
-        { method: "DELETE" },
-        timeoutMs,
-      );
+      await call(`${base}/threads?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     },
   };
 }
